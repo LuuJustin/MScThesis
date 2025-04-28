@@ -40,7 +40,7 @@ class HipXrayBinaryDataset(Dataset):
             stratify=self.labels,
             random_state=random_seed
         )
-
+        print('images shape: ', self.images.shape)
         self.indices = train_idx if split == 'train' else val_idx
         print(f"[{split.upper()}] Loaded {len(self.indices)} samples from {len(h5_files)} HDF5 files.")
 

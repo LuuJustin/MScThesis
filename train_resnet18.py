@@ -1,16 +1,71 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from torchvision import models
 import torch.optim as optim
+import lightning as L
+from torch.utils.data import DataLoader
+from torchvision.models import resnet18, ResNet18_Weights
 from sklearn.metrics import accuracy_score, roc_auc_score
-from tqdm import tqdm
-
 from data_handler import HipXrayBinaryDataset
+from pytorch_lightning.loggers import TensorBoardLogger
 
-
+# Define where to save your models
 save_path = '../../../../tudelft.net/staff-umbrella/MScThesisJLuu/models'
+
+
+class HipXrayClassifier(L.LightningModule):
+    def __init__(self, lr=1e-4):
+        super().__init__()
+        self.save_hyperparameters()
+
+        # Load pretrained ResNet18
+        self.model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        self.model.fc = nn.Linear(self.model.fc.in_features, 1)
+
+        self.criterion = nn.BCEWithLogitsLoss()
+
+    def forward(self, x):
+        return self.model(x)
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        y = y.float().unsqueeze(1)  # make sure target shape matches output
+        logits = self(x)
+        loss = self.criterion(logits, y)
+
+        preds = torch.sigmoid(logits)
+        acc = accuracy_score(y.cpu(), (preds.cpu() > 0.5).int())
+
+        self.log('train_loss', loss, prog_bar=True)
+        self.log('train_acc', acc, prog_bar=True)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()  # Wait for all kernels to finish
+            allocated = torch.cuda.memory_allocated() / 1024 ** 2  # in MB
+            reserved = torch.cuda.memory_reserved() / 1024 ** 2  # in MB
+            max_allocated = torch.cuda.max_memory_allocated() / 1024 ** 2  # peak
+            max_reserved = torch.cuda.max_memory_reserved() / 1024 ** 2
+
+            print(
+                f"[GPU Stats] Allocated: {allocated:.2f} MB | Reserved: {reserved:.2f} MB | Max Allocated: {max_allocated:.2f} MB | Max Reserved: {max_reserved:.2f} MB")
+
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        y = y.float().unsqueeze(1)
+        logits = self(x)
+        loss = self.criterion(logits, y)
+
+        preds = torch.sigmoid(logits)
+        acc = accuracy_score(y.cpu(), (preds.cpu() > 0.5).int())
+        auc = roc_auc_score(y.cpu(), preds.cpu())
+
+        self.log('val_loss', loss, prog_bar=True)
+        self.log('val_acc', acc, prog_bar=True)
+        self.log('val_auc', auc, prog_bar=True)
+
+    def configure_optimizers(self):
+        return optim.AdamW(self.parameters(), lr=self.hparams.lr)
 
 
 def get_dataloaders(oai_files, check_files=None, batch_size=32):
@@ -20,89 +75,40 @@ def get_dataloaders(oai_files, check_files=None, batch_size=32):
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
     if check_files:
-        check_val = HipXrayBinaryDataset(check_files, split='val')  # test-on-CHECK
+        check_val = HipXrayBinaryDataset(check_files, split='val')
         check_val_loader = DataLoader(check_val, batch_size=batch_size, shuffle=False)
         return train_loader, val_loader, check_val_loader
 
     return train_loader, val_loader, None
 
 
-def get_model():
-    model = models.resnet18(weights=True)
-    model.fc = nn.Linear(model.fc.in_features, 1)  # Binary output (logits)
-    return model
+def train_model(oai_files, check_files=None, num_epochs=100, batch_size=32, lr=1e-4):
+    train_loader, val_loader, check_val_loader = get_dataloaders(oai_files, check_files, batch_size)
 
+    model = HipXrayClassifier(lr=lr)
 
-def train_one_epoch(model, loader, criterion, optimizer, device):
-    model.train()
-    epoch_loss = 0
-    preds, targets = [], []
+    logger = TensorBoardLogger("logs", name="hip_xray_classifier")
 
-    for x, y in tqdm(loader, desc="Training"):
-        x, y = x.to(device), y.float().to(device).unsqueeze(1)
+    checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
+        dirpath=save_path,
+        filename='OA_classifier-{epoch:03d}',
+        save_top_k=1,
+        save_weights_only=True,
+        verbose=True
+    )
 
-        optimizer.zero_grad()
-        out = model(x)
-        loss = criterion(out, y)
-        loss.backward()
-        optimizer.step()
+    early_stopping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", mode="min")
 
-        epoch_loss += loss.item() * x.size(0)
-        preds.extend(torch.sigmoid(out).detach().cpu().numpy())
-        targets.extend(y.cpu().numpy())
+    trainer = L.Trainer(
+        max_epochs=num_epochs,
+        accelerator="gpu",
+        devices=-1,
+        precision="16-mixed",
+        callbacks=[checkpoint_callback, early_stopping],
+        log_every_n_steps=5,
+        logger=logger
+    )
 
-    preds = (np.array(preds) > 0.5).astype(int)
-    acc = accuracy_score(targets, preds)
-    return epoch_loss / len(loader.dataset), acc
-
-
-def evaluate(model, loader, criterion, device, desc="Validation"):
-    model.eval()
-    epoch_loss = 0
-    preds, targets = [], []
-
-    with torch.no_grad():
-        for x, y in tqdm(loader, desc=desc):
-            x, y = x.to(device), y.float().to(device).unsqueeze(1)
-            out = model(x)
-            loss = criterion(out, y)
-            epoch_loss += loss.item() * x.size(0)
-
-            preds.extend(torch.sigmoid(out).cpu().numpy())
-            targets.extend(y.cpu().numpy())
-
-    preds_bin = (np.array(preds) > 0.5).astype(int)
-    acc = accuracy_score(targets, preds_bin)
-    auc = roc_auc_score(targets, preds)
-    return epoch_loss / len(loader.dataset), acc, auc
-
-
-def train_model(oai_files, check_files=None, num_epochs=10, lr=1e-4):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = get_model().to(device)
-
-    train_loader, val_loader, check_val_loader = get_dataloaders(oai_files, check_files)
-
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-
-    for epoch in range(1, num_epochs + 1):
-        print(f"\nEpoch {epoch}/{num_epochs}")
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, val_acc, val_auc = evaluate(model, val_loader, criterion, device)
-
-        save_model(model, f'{save_path}/model_epoch_{epoch}.pth')
-
-        print(f"Train Loss: {train_loss:.4f} | Acc: {train_acc:.4f}")
-        print(f"Val   Loss: {val_loss:.4f} | Acc: {val_acc:.4f} | AUC: {val_auc:.4f}")
-
-        if check_val_loader:
-            chk_loss, chk_acc, chk_auc = evaluate(model, check_val_loader, criterion, device, desc="CHECK Eval")
-            print(f"CHECK Eval: Loss: {chk_loss:.4f} | Acc: {chk_acc:.4f} | AUC: {chk_auc:.4f}")
+    trainer.fit(model, train_loader, val_loader)
 
     return model
-
-
-def save_model(model, path):
-    torch.save(model.state_dict(), path)
-    print(f"Model saved to {path}")
