@@ -80,12 +80,12 @@ def get_dataloaders(oai_files, check_files=None, batch_size=32):
     train_ds = HipXrayBinaryDataset(oai_files, split='train')
     val_ds = HipXrayBinaryDataset(oai_files, split='val')
     os.cpu_count()
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
     if check_files:
         check_val = HipXrayBinaryDataset(check_files, split='val')
-        check_val_loader = DataLoader(check_val, batch_size=batch_size, shuffle=False, num_workers=4)
+        check_val_loader = DataLoader(check_val, batch_size=batch_size, shuffle=False)
         return train_loader, val_loader, check_val_loader
 
     return train_loader, val_loader, None
