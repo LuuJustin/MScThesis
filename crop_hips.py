@@ -142,25 +142,22 @@ def resize_and_normalize(img, resize_px=224):
 
     # Normalize to [0,1]
     img_resized = img_resized.astype(np.float32)
-    img_resized = (img_resized - img_resized.min()) / (img_resized.max() - img_resized.min() + 1e-8)
 
-    # Convert to 3-channel array
-    img_resized = np.stack([img_resized] * 3, axis=0)  # (3, H, W)
-
-    # Apply ImageNet normalization
-    mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
-    std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
-    img_resized = (img_resized - mean) / std
-
+    # Normalize each image: mean 0, std 1
+    mean = np.mean(img_resized)
+    std = np.std(img_resized)
+    if std > 0:
+        img_resized = (img_resized - mean) / std
+    else:
+        img_resized = img_resized - mean  # no div by 0
     return img_resized
 
 
 def save_partitioned_hip_crops(df, dataset_name, output_dir, partition_size):
-
     str_dt = h5py.string_dtype(encoding='utf-8')
     left_imgs, right_imgs = [], []
     left_scores, right_scores = [], []
-    left_dicom_paths, right_dicom_paths = [], []
+    left_subject_ids, right_subject_ids = [], []
 
     part_idx = 0
     sample_count = 0
@@ -168,6 +165,7 @@ def save_partitioned_hip_crops(df, dataset_name, output_dir, partition_size):
     for _, row in tqdm(df.iterrows(), total=len(df), desc=f"Processing {dataset_name}"):
         dicom_path = path_from_code + row['dicom']
         points_path = path_from_code + row['points']
+        subject_id = str(row['subject_id'])  # Ensure it's a string
 
         try:
             left_crop, right_crop = process_dicom_file(dicom_path, points_path)
@@ -180,46 +178,45 @@ def save_partitioned_hip_crops(df, dataset_name, output_dir, partition_size):
         if row["Hip_OA_score_left_hip"] < 5:
             left_imgs.append(left_crop)
             left_scores.append(row["Hip_OA_score_left_hip"])
-            left_dicom_paths.append(dicom_path)
+            left_subject_ids.append(subject_id)
         if row["Hip_OA_score_right_hip"] < 5:
             right_imgs.append(right_crop)
             right_scores.append(row["Hip_OA_score_right_hip"])
-            right_dicom_paths.append(dicom_path)
+            right_subject_ids.append(subject_id)
 
         sample_count += 1
 
-        # Save a partition
         if sample_count % partition_size == 0:
             part_filename = f"{dataset_name}_part{part_idx:02d}.h5"
             save_path = output_dir + part_filename
             with h5py.File(save_path, 'w') as grp:
                 grp.create_dataset("left_hip/images", data=np.stack(left_imgs), compression="gzip")
                 grp.create_dataset("left_hip/scores", data=np.array(left_scores))
-                grp.create_dataset("left_hip/paths", data=np.array(left_dicom_paths, dtype=object), dtype=str_dt)
+                grp.create_dataset("left_hip/subject_ids", data=np.array(left_subject_ids, dtype=object), dtype=str_dt)
 
                 grp.create_dataset("right_hip/images", data=np.stack(right_imgs), compression="gzip")
                 grp.create_dataset("right_hip/scores", data=np.array(right_scores))
-                grp.create_dataset("right_hip/paths", data=np.array(right_dicom_paths, dtype=object), dtype=str_dt)
+                grp.create_dataset("right_hip/subject_ids", data=np.array(right_subject_ids, dtype=object),
+                                   dtype=str_dt)
+
             print(f"Saved chunk {part_idx:02d} with {len(left_imgs)} samples to {save_path}")
             part_idx += 1
 
-            # Reset storage
             left_imgs, right_imgs = [], []
             left_scores, right_scores = [], []
-            left_dicom_paths, right_dicom_paths = [], []
+            left_subject_ids, right_subject_ids = [], []
 
-    # Save remaining data
     if left_imgs:
         part_filename = f"{dataset_name}_part{part_idx:02d}.h5"
         save_path = output_dir + part_filename
         with h5py.File(save_path, 'w') as grp:
             grp.create_dataset("left_hip/images", data=np.stack(left_imgs), compression="gzip")
             grp.create_dataset("left_hip/scores", data=np.array(left_scores))
-            grp.create_dataset("left_hip/paths", data=np.array(left_dicom_paths, dtype=object), dtype=str_dt)
+            grp.create_dataset("left_hip/subject_ids", data=np.array(left_subject_ids, dtype=object), dtype=str_dt)
 
             grp.create_dataset("right_hip/images", data=np.stack(right_imgs), compression="gzip")
             grp.create_dataset("right_hip/scores", data=np.array(right_scores))
-            grp.create_dataset("right_hip/paths", data=np.array(right_dicom_paths, dtype=object), dtype=str_dt)
+            grp.create_dataset("right_hip/subject_ids", data=np.array(right_subject_ids, dtype=object), dtype=str_dt)
 
         print(f"Saved final chunk {part_idx:02d} with {len(left_imgs)} samples to {save_path}")
 
@@ -235,5 +232,3 @@ def save_hip_crops_to_hdf5(excel_path, output_dir, partition_size):
 save_hip_crops_to_hdf5(
     path_from_code + '/staff-umbrella/osteoarthritis2024/shared/data/CS3000_allsubjects_all_visits_files_scores.xlsx',
     path_from_code + '/staff-umbrella/MScThesisJLuu/data/', partition_size)
-
-
