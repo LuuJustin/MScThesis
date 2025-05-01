@@ -150,6 +150,8 @@ def resize_and_normalize(img, resize_px=224):
         img_resized = (img_resized - mean) / std
     else:
         img_resized = img_resized - mean  # no div by 0
+
+    img_resized = np.stack([img_resized] * 3, axis=0)  # shape: (3, H, W)
     return img_resized
 
 
