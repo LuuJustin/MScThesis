@@ -41,13 +41,16 @@ class HipXrayBinaryDataset(Dataset):
             all_subjects,
             test_size=val_ratio,
             random_state=random_seed,
-            stratify=[self.labels[subject_to_indices[s][0]] for s in all_subjects]
+            stratify=[int(np.any(self.labels[subject_to_indices[s]] == 1)) for s in all_subjects]
         )
+        val_labels = self.labels[[i for s in val_subjects for i in subject_to_indices[s]]]
+        print(f"[VAL SET] Class distribution: {np.bincount(val_labels)}")
 
         selected_subjects = train_subjects if split == 'train' else val_subjects
         self.indices = [i for s in selected_subjects for i in subject_to_indices[s]]
 
-        print(f"[{split.upper()}] Loaded {len(self.indices)} samples from {len(h5_files)} HDF5 files ({len(selected_subjects)} subjects).")
+        print(
+            f"[{split.upper()}] Loaded {len(self.indices)} samples from {len(h5_files)} HDF5 files ({len(selected_subjects)} subjects).")
 
     def __len__(self):
         return len(self.indices)
@@ -57,4 +60,3 @@ class HipXrayBinaryDataset(Dataset):
         img = torch.tensor(self.images[real_idx], dtype=torch.float32)
         label = torch.tensor(self.labels[real_idx], dtype=torch.long)
         return img, label
-
